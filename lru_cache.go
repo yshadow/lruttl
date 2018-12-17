@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// The implementation borrows heavily from SmallLRUCache (originally by Nathan
+// Package cache borrows heavily from SmallLRUCache (originally by Nathan
 // Schrenk). The object maintains a doubly-linked list of elements in the
 // When an element is accessed it is promoted to the head of the list, and when
 // space is needed the element at the tail of the list (the least recently used
@@ -16,14 +16,15 @@ import (
 	"time"
 )
 
+// Value is value stored in the cache
+type Value interface{}
+
+// LRUCache is static and TTL based implementation of LRU cache
 type LRUCache struct {
 	mu sync.Mutex
 
 	// is this a ttl based evict lru?
 	timed bool
-
-	// time we last checked ttl expirations
-	last_ttl_check time.Time
 
 	EvictCallback func(string, Value)
 
@@ -31,31 +32,24 @@ type LRUCache struct {
 	list  *list.List
 	table map[string]*list.Element
 
-	// Our current size, in bytes. Obviously a gross simplification and low-grade
-	// approximation.
-	size uint64
-
-	// How many bytes we are limiting the cache to.
+	// How many items we are limiting the cache to.
 	capacity uint64
 }
 
-// Values that go into LRUCache need to satisfy this interface.
-type Value interface {
-	Size() int
-}
-
+// Item is a container for items listing
 type Item struct {
 	Key   string
 	Value Value
 }
 
 type entry struct {
-	key           string
-	value         Value
-	size          int
-	time_accessed time.Time
+	key          string
+	value        Value
+	timeAccessed time.Time
 }
 
+// NewLRUCache make a new instance of static LRU cache where eviction is based
+// on number of items in the cache
 func NewLRUCache(capacity uint64) *LRUCache {
 	return &LRUCache{
 		list:     list.New(),
@@ -64,7 +58,7 @@ func NewLRUCache(capacity uint64) *LRUCache {
 	}
 }
 
-// create a new Lru, which evicts units after a time period of non use
+// NewTimeEvictLRU creates a new Lru, which evicts units after a time period of non use
 //
 //    @ttl is time an entry exists before it is evicted
 //    @checkEvery is duration to check every x
@@ -74,14 +68,13 @@ func NewLRUCache(capacity uint64) *LRUCache {
 //    l.EvictCallback = func(key string, v Value) {
 //    	evictCt++
 //    }
-func NewTimeEvictLru(capacity uint64, ttl, checkEvery time.Duration) *LRUCache {
+func NewTimeEvictLRU(capacity uint64, ttl, checkEvery time.Duration) *LRUCache {
 
 	lru := LRUCache{
-		timed:          true,
-		last_ttl_check: time.Now(),
-		list:           list.New(),
-		table:          make(map[string]*list.Element),
-		capacity:       capacity,
+		timed:    true,
+		list:     list.New(),
+		table:    make(map[string]*list.Element),
+		capacity: capacity,
 	}
 
 	timer := time.NewTicker(checkEvery)
@@ -90,7 +83,7 @@ func NewTimeEvictLru(capacity uint64, ttl, checkEvery time.Duration) *LRUCache {
 			select {
 			case now := <-timer.C:
 				TimeEvict(&lru, now, ttl)
-				// case _ = <-done:
+				// TODO case _ = <-done:
 				// 	return
 			}
 		}
@@ -99,7 +92,7 @@ func NewTimeEvictLru(capacity uint64, ttl, checkEvery time.Duration) *LRUCache {
 	return &lru
 }
 
-// this time eviction is called by a scheduler for background, periodic evictions
+// TimeEvict this time eviction is called by a scheduler for background, periodic evictions
 func TimeEvict(lru *LRUCache, now time.Time, ttl time.Duration) {
 	lru.mu.Lock()
 	defer lru.mu.Unlock()
@@ -119,7 +112,7 @@ func TimeEvict(lru *LRUCache, now time.Time, ttl time.Duration) {
 			break
 		}
 		n = el.Value.(*entry)
-		if now.Sub(n.time_accessed) > ttl {
+		if now.Sub(n.timeAccessed) > ttl {
 			// the Difference is greater than max TTL so we need to evict this entry
 			// first grab the next entry (as this is about to dissappear)
 			el = el.Prev()
@@ -133,9 +126,10 @@ func TimeEvict(lru *LRUCache, now time.Time, ttl time.Duration) {
 			break
 		}
 	}
-	lru.last_ttl_check = time.Now()
 }
 
+// Get gets the value identified by a key and ok flag telling if it was found.
+// It updates the access time of that item.
 func (lru *LRUCache) Get(key string) (v Value, ok bool) {
 	lru.mu.Lock()
 	defer lru.mu.Unlock()
@@ -148,6 +142,20 @@ func (lru *LRUCache) Get(key string) (v Value, ok bool) {
 	return element.Value.(*entry).value, true
 }
 
+// Peek gets the value identified by a key and ok flag telling if it was found.
+// It doesnt' update the access time of that item.
+func (lru *LRUCache) Peek(key string) (v Value, ok bool) {
+	lru.mu.Lock()
+	defer lru.mu.Unlock()
+
+	element := lru.table[key]
+	if element == nil {
+		return nil, false
+	}
+	return element.Value.(*entry).value, true
+}
+
+// Set stores value under a given key
 func (lru *LRUCache) Set(key string, value Value) {
 	lru.mu.Lock()
 	defer lru.mu.Unlock()
@@ -159,6 +167,8 @@ func (lru *LRUCache) Set(key string, value Value) {
 	}
 }
 
+// SetIfAbsent set the value to the cache if it doesn't exist.
+// If it exists it just refreshes the access time.
 func (lru *LRUCache) SetIfAbsent(key string, value Value) {
 	lru.mu.Lock()
 	defer lru.mu.Unlock()
@@ -178,25 +188,27 @@ func (lru *LRUCache) remove(key string) bool {
 
 	lru.list.Remove(element)
 	delete(lru.table, key)
-	lru.size -= uint64(element.Value.(*entry).size)
 	return true
 }
 
+// Delete removes the value identified by key from the cache and
+// returns the flag if it was found.
 func (lru *LRUCache) Delete(key string) bool {
 	lru.mu.Lock()
 	defer lru.mu.Unlock()
 	return lru.remove(key)
 }
 
+// Clear clears the cache
 func (lru *LRUCache) Clear() {
 	lru.mu.Lock()
 	defer lru.mu.Unlock()
 
 	lru.list.Init()
 	lru.table = make(map[string]*list.Element)
-	lru.size = 0
 }
 
+// SetCapacity sets the capacity of the cache
 func (lru *LRUCache) SetCapacity(capacity uint64) {
 	lru.mu.Lock()
 	defer lru.mu.Unlock()
@@ -205,23 +217,26 @@ func (lru *LRUCache) SetCapacity(capacity uint64) {
 	lru.checkCapacity()
 }
 
-func (lru *LRUCache) Stats() (length, size, capacity uint64, oldest time.Time) {
+// Stats gets the cache statistic (length, capacity, access time of oldest item)
+func (lru *LRUCache) Stats() (length, capacity uint64, oldest time.Time) {
 	lru.mu.Lock()
 	defer lru.mu.Unlock()
 	if lastElem := lru.list.Back(); lastElem != nil {
-		oldest = lastElem.Value.(*entry).time_accessed
+		oldest = lastElem.Value.(*entry).timeAccessed
 	}
-	return uint64(lru.list.Len()), lru.size, lru.capacity, oldest
+	return uint64(lru.list.Len()), lru.capacity, oldest
 }
 
+// StatsJSON gets the statistic in JSON format
 func (lru *LRUCache) StatsJSON() string {
 	if lru == nil {
 		return "{}"
 	}
-	l, s, c, o := lru.Stats()
-	return fmt.Sprintf("{\"Length\": %v, \"Size\": %v, \"Capacity\": %v, \"OldestAccess\": \"%v\"}", l, s, c, o)
+	l, c, o := lru.Stats()
+	return fmt.Sprintf("{\"Length\": %v, \"Capacity\": %v, \"OldestAccess\": \"%v\"}", l, c, o)
 }
 
+// Keys gets the keys as a slice of string
 func (lru *LRUCache) Keys() []string {
 	lru.mu.Lock()
 	defer lru.mu.Unlock()
@@ -233,6 +248,7 @@ func (lru *LRUCache) Keys() []string {
 	return keys
 }
 
+// Len gets the current number of items stored in the cache
 func (lru *LRUCache) Len() int {
 	lru.mu.Lock()
 	defer lru.mu.Unlock()
@@ -240,6 +256,7 @@ func (lru *LRUCache) Len() int {
 	return lru.list.Len()
 }
 
+// Items provides view of Items stored in the cache
 func (lru *LRUCache) Items() []Item {
 	lru.mu.Lock()
 	defer lru.mu.Unlock()
@@ -253,35 +270,31 @@ func (lru *LRUCache) Items() []Item {
 }
 
 func (lru *LRUCache) updateInplace(element *list.Element, value Value) {
-	valueSize := value.Size()
-	sizeDiff := valueSize - element.Value.(*entry).size
 	element.Value.(*entry).value = value
-	element.Value.(*entry).size = valueSize
-	lru.size += uint64(sizeDiff)
 	lru.moveToFront(element)
 	lru.checkCapacity()
 }
 
 func (lru *LRUCache) moveToFront(element *list.Element) {
 	lru.list.MoveToFront(element)
-	element.Value.(*entry).time_accessed = time.Now()
+	element.Value.(*entry).timeAccessed = time.Now()
 }
 
 func (lru *LRUCache) addNew(key string, value Value) {
-	newEntry := &entry{key, value, value.Size(), time.Now()}
+	newEntry := &entry{key, value, time.Now()}
 	element := lru.list.PushFront(newEntry)
 	lru.table[key] = element
-	lru.size += uint64(newEntry.size)
 	lru.checkCapacity()
 }
 
 func (lru *LRUCache) checkCapacity() {
-	// Partially duplicated from Delete
-	for lru.size > lru.capacity {
+	cl := uint64(lru.list.Len())
+
+	for cl > lru.capacity {
 		delElem := lru.list.Back()
 		delValue := delElem.Value.(*entry)
 		lru.list.Remove(delElem)
 		delete(lru.table, delValue.key)
-		lru.size -= uint64(delValue.size)
+		cl--
 	}
 }

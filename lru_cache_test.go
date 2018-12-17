@@ -5,32 +5,22 @@
 package cache
 
 import (
-	u "github.com/araddon/gou"
 	"strconv"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
 )
 
-func init() {
-	u.SetupLogging("debug")
-}
-
 type CacheValue struct {
-	size int
-}
-
-func (cv *CacheValue) Size() int {
-	return cv.size
+	val int
 }
 
 func TestInitialState(t *testing.T) {
 	cache := NewLRUCache(5)
-	l, sz, c, _ := cache.Stats()
+	l, c, _ := cache.Stats()
 	if l != 0 {
 		t.Errorf("length = %v, want 0", l)
-	}
-	if sz != 0 {
-		t.Errorf("size = %v, want 0", sz)
 	}
 	if c != 5 {
 		t.Errorf("capacity = %v, want 5", c)
@@ -71,14 +61,14 @@ func TestSetUpdatesSize(t *testing.T) {
 	emptyValue := &CacheValue{0}
 	key := "key1"
 	cache.Set(key, emptyValue)
-	if _, sz, _, _ := cache.Stats(); sz != 0 {
-		t.Errorf("cache.Size() = %v, expected 0", sz)
+	if ln, _, _ := cache.Stats(); ln != 1 {
+		t.Errorf("cache.Size() = %v, expected 1", ln)
 	}
 	someValue := &CacheValue{20}
 	key = "key2"
 	cache.Set(key, someValue)
-	if _, sz, _, _ := cache.Stats(); sz != 20 {
-		t.Errorf("cache.Size() = %v, expected 20", sz)
+	if ln, _, _ := cache.Stats(); ln != 2 {
+		t.Errorf("cache.Size() = %v, expected 2", ln)
 	}
 }
 
@@ -102,15 +92,15 @@ func TestSetWithOldKeyUpdatesSize(t *testing.T) {
 	key := "key1"
 	cache.Set(key, emptyValue)
 
-	if _, sz, _, _ := cache.Stats(); sz != 0 {
-		t.Errorf("cache.Size() = %v, expected %v", sz, 0)
+	if ln, _, _ := cache.Stats(); ln != 1 {
+		t.Errorf("cache.Size() = %v, expected %v", ln, 1)
 	}
 
 	someValue := &CacheValue{20}
 	cache.Set(key, someValue)
-	expected := uint64(someValue.size)
-	if _, sz, _, _ := cache.Stats(); sz != expected {
-		t.Errorf("cache.Size() = %v, expected %v", sz, expected)
+	expected := uint64(1)
+	if ln, _, _ := cache.Stats(); ln != expected {
+		t.Errorf("cache.Size() = %v, expected %v", ln, expected)
 	}
 }
 
@@ -137,8 +127,8 @@ func TestDelete(t *testing.T) {
 		t.Error("Expected item to be in cache.")
 	}
 
-	if _, sz, _, _ := cache.Stats(); sz != 0 {
-		t.Errorf("cache.Size() = %v, expected 0", sz)
+	if ln, _, _ := cache.Stats(); ln != 0 {
+		t.Errorf("cache.Size() = %v, expected 0", ln)
 	}
 
 	if _, ok := cache.Get(key); ok {
@@ -154,8 +144,8 @@ func TestClear(t *testing.T) {
 	cache.Set(key, value)
 	cache.Clear()
 
-	if _, sz, _, _ := cache.Stats(); sz != 0 {
-		t.Errorf("cache.Size() = %v, expected 0 after Clear()", sz)
+	if ln, _, _ := cache.Stats(); ln != 0 {
+		t.Errorf("cache.Size() = %v, expected 0 after Clear()", ln)
 	}
 }
 
@@ -168,13 +158,13 @@ func TestCapacityIsObeyed(t *testing.T) {
 	cache.Set("key1", value)
 	cache.Set("key2", value)
 	cache.Set("key3", value)
-	if _, sz, _, _ := cache.Stats(); sz != size {
-		t.Errorf("cache.Size() = %v, expected %v", sz, size)
+	if ln, _, _ := cache.Stats(); ln != size {
+		t.Errorf("cache.Size() = %v, expected %v", ln, size)
 	}
 	// Insert one more; something should be evicted to make room.
 	cache.Set("key4", value)
-	if _, sz, _, _ := cache.Stats(); sz != size {
-		t.Errorf("post-evict cache.Size() = %v, expected %v", sz, size)
+	if ln, _, _ := cache.Stats(); ln != size {
+		t.Errorf("post-evict cache.Size() = %v, expected %v", ln, size)
 	}
 }
 
@@ -202,12 +192,13 @@ func TestLRUIsEvicted(t *testing.T) {
 	}
 }
 
-func TestLRUTtlEvict(t *testing.T) {
+func TestLRUTTLEvict(t *testing.T) {
 
 	// ttl = 1 second, 100 ms heartbeats, should check 10 times
-	l := NewTimeEvictLru(10000, 200*time.Millisecond, 50*time.Millisecond)
+	l := NewTimeEvictLRU(100, 100*time.Millisecond, 100*time.Millisecond)
 
-	var evictCt int = 0
+	var evictCt int
+	expectedEvictCt := 100
 
 	l.EvictCallback = func(key string, v Value) {
 		evictCt++
@@ -219,10 +210,8 @@ func TestLRUTtlEvict(t *testing.T) {
 		l.Set("key"+istr, &CacheValue{i})
 	}
 
-	u.WaitFor(func() bool {
-		return l.Len() == 0
-	}, 10)
-	u.Assert(l.Len() == 0, t, "should have evicted all items but still have %d", l.Len())
-	u.Assert(evictCt == 100, t, "Should have evicted 100 items but have %d", evictCt)
+	time.Sleep(time.Second)
 
+	assert.Equal(t, expectedEvictCt, evictCt, "Evict function should be called %d times", expectedEvictCt)
+	assert.Equal(t, 0, l.Len(), "Cache should be empty at the end")
 }
